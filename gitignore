@@ -1,0 +1,9 @@
+# Banco de dados - contém os nobreaks reais do hospital, não deve ir para o GitHub
+nobreaks.db
+
+# Arquivos temporários do Python
+__pycache__/
+*.pyc
+
+# Arquivos do VS Code (opcional, remova se quiser versionar suas configs)
+.vscode/
