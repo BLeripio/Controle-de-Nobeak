@@ -29,6 +29,9 @@ COR_BOLINHA_FUNCIONANDO = "#22a35a"   # verde
 COR_BOLINHA_DEFEITO = "#e5484d"       # vermelho
 COR_BOLINHA_MANUTENCAO = "#f5a524"    # amarelo/laranja
 
+COR_ALERTA_DOURADO = "#f0b429"        # "!" de pendência (sem número de série / duplicado)
+COR_ALERTA_TEXTO = "#4a3300"
+
 FONTE_PADRAO = ("Segoe UI", 10)
 FONTE_TITULO_CARTAO = ("Segoe UI", 11, "bold")
 FONTE_NEGRITO = ("Segoe UI", 10, "bold")
@@ -36,6 +39,35 @@ FONTE_NEGRITO = ("Segoe UI", 10, "bold")
 # Ícone da janela / barra de tarefas (precisa estar na mesma pasta deste arquivo)
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_ICONE = os.path.join(PASTA_ATUAL, "nobreak_icone.ico")
+
+
+class DicaFerramenta:
+    """Uma dica de texto simples que aparece ao passar o mouse sobre um widget."""
+
+    def __init__(self, widget, texto: str):
+        self.widget = widget
+        self.texto = texto
+        self.janela = None
+        widget.bind("<Enter>", self._mostrar)
+        widget.bind("<Leave>", self._esconder)
+
+    def _mostrar(self, _evento=None):
+        if self.janela or not self.texto:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.janela = tk.Toplevel(self.widget)
+        self.janela.wm_overrideredirect(True)
+        self.janela.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self.janela, text=self.texto, bg="#333333", fg="white",
+            font=("Segoe UI", 9), padx=8, pady=4, relief="solid", borderwidth=1,
+        ).pack()
+
+    def _esconder(self, _evento=None):
+        if self.janela:
+            self.janela.destroy()
+            self.janela = None
 
 
 def criar_campo_maiusculas(parent: tk.Frame, width: int = 30) -> ttk.Entry:
@@ -89,12 +121,37 @@ class AppNobreaks(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._ao_fechar)
         self.atualizar_lista()
+        self.after(400, self._verificar_pendencias_iniciais)
 
     def _aplicar_icone(self):
         try:
             self.iconbitmap(default=CAMINHO_ICONE)
         except tk.TclError:
             pass  # ícone incompatível com o sistema (ex: Linux/Mac) - ignora sem quebrar o app
+
+    def _verificar_pendencias_iniciais(self):
+        """Mostra um aviso, ao abrir o programa, se houver nobreaks sem número de
+        série real ou possíveis duplicados - para lembrar de corrigir o cadastro."""
+        sem_serie = self.gerenciador.buscar_sem_numero_serie_real()
+        duplicados = self.gerenciador.buscar_possiveis_duplicados()
+
+        if not sem_serie and not duplicados:
+            return
+
+        blocos = []
+
+        if sem_serie:
+            linhas = [f"• {nb.numero_serie} — {nome_andar(nb.local.andar)} / {nb.local.setor}" for nb in sem_serie]
+            blocos.append(f"SEM NÚMERO DE SÉRIE ({len(sem_serie)}):\n" + "\n".join(linhas))
+
+        if duplicados:
+            linhas = [
+                " x ".join(f"{nb.numero_serie} ({nb.local.setor})" for nb in grupo) for grupo in duplicados
+            ]
+            blocos.append("ESSES NOBREAKS ESTÃO DUPLICADOS:\n" + "\n".join(linhas))
+
+        texto_completo = "\n\n".join(blocos) + "\n\nUse a opção 'Editar' para corrigir."
+        JanelaPendencias(self, texto_completo)
 
     def _configurar_estilo(self):
         estilo = ttk.Style(self)
@@ -228,6 +285,21 @@ class AppNobreaks(tk.Tk):
             widget.destroy()
         self._widgets_nobreak = {}
 
+        # Descobre quais nobreaks têm pendência, para desenhar o "!" dourado.
+        self._conjunto_sem_serie = {
+            nb.numero_serie for nb in self.gerenciador.buscar_sem_numero_serie_real()
+        }
+        self._mapa_par_duplicado = {}
+        for grupo in self.gerenciador.buscar_possiveis_duplicados():
+            for nb in grupo:
+                outros = [outro for outro in grupo if outro.numero_serie != nb.numero_serie]
+                if outros:
+                    self._mapa_par_duplicado[nb.numero_serie] = outros[0]
+        self._andares_com_pendencia = set()
+        for nb in self.gerenciador.todos():
+            if nb.numero_serie in self._conjunto_sem_serie or nb.numero_serie in self._mapa_par_duplicado:
+                self._andares_com_pendencia.add(nb.local.andar)
+
         for andar in ANDARES_VALIDOS:
             self._criar_cabecalho_andar(andar)
             if self.andares_abertos[andar]:
@@ -254,6 +326,31 @@ class AppNobreaks(tk.Tk):
             self.after(30, self._rolar_ate_widget, self._rolar_ate_pendente)
             self._rolar_ate_pendente = None
 
+    def _criar_selo_alerta(self, parent: tk.Frame, cor_fundo: str, texto_dica: str, ao_clicar=None) -> tk.Canvas:
+        """Desenha um '!' dourado (usado tanto na pasta do andar quanto na linha do
+        nobreak). Mostra uma dica com o texto do erro ao passar o mouse, e executa
+        ao_clicar() se for informado (usado para navegar até o nobreak duplicado)."""
+        selo = tk.Canvas(
+            parent, width=18, height=18, bg=cor_fundo, highlightthickness=0,
+            cursor="hand2" if ao_clicar else "arrow",
+        )
+        selo.create_oval(1, 1, 17, 17, fill=COR_ALERTA_DOURADO, outline=COR_ALERTA_DOURADO)
+        selo.create_text(9, 9, text="!", fill=COR_ALERTA_TEXTO, font=("Segoe UI", 10, "bold"))
+        DicaFerramenta(selo, texto_dica)
+        if ao_clicar:
+            selo.bind("<Button-1>", lambda evento: ao_clicar())
+        return selo
+
+    def _navegar_para(self, numero_serie: str):
+        """Abre a pasta do andar certo, seleciona e rola até o nobreak indicado."""
+        nobreak = self.gerenciador.buscar(numero_serie)
+        if not nobreak:
+            return
+        self.andares_abertos[nobreak.local.andar] = True
+        self.numero_serie_selecionado = numero_serie
+        self._rolar_ate_pendente = numero_serie
+        self.atualizar_lista()
+
     def _criar_cabecalho_andar(self, andar: str):
         contagem = self.gerenciador.contar_por_andar(andar)
         qtd_funcionando = contagem.get(StatusNobreak.FUNCIONANDO, 0)
@@ -272,6 +369,13 @@ class AppNobreaks(tk.Tk):
             fg=COR_TEXTO_SECUNDARIO, width=2,
         )
         lbl_seta.pack(side="left")
+
+        if andar in self._andares_com_pendencia:
+            selo_andar = self._criar_selo_alerta(
+                conteudo, COR_FUNDO_CARTAO,
+                "Este andar tem nobreak(s) com pendência (sem número de série ou duplicado)",
+            )
+            selo_andar.pack(side="left", padx=(4, 0))
 
         lbl_nome = tk.Label(
             conteudo, text=f"📁  {nome_andar(andar)}", bg=COR_FUNDO_CARTAO,
@@ -359,11 +463,22 @@ class AppNobreaks(tk.Tk):
             )
             lbl_serie.pack(side="left")
 
+            if nb.numero_serie in self._conjunto_sem_serie:
+                selo_erro = self._criar_selo_alerta(conteudo, cor_fundo, "SEM NÚMERO DE SÉRIE")
+                selo_erro.pack(side="left", padx=(6, 0))
+            elif nb.numero_serie in self._mapa_par_duplicado:
+                par = self._mapa_par_duplicado[nb.numero_serie]
+                selo_erro = self._criar_selo_alerta(
+                    conteudo, cor_fundo, "NÚMERO DE SÉRIE REPETIDO (clique para ver o outro)",
+                    ao_clicar=lambda ns=par.numero_serie: self._navegar_para(ns),
+                )
+                selo_erro.pack(side="left", padx=(6, 0))
+
             detalhes = [nb.local.setor, nb.status.value.capitalize()]
             if nb.va:
-                detalhes.append(f"{nb.va} VA")
-            if nb.modelo:
-                detalhes.append(nb.modelo)
+                detalhes.append(nb.va)
+            if nb.marca or nb.modelo:
+                detalhes.append(" ".join(filter(None, [nb.marca, nb.modelo])))
             if nb.observacao:
                 detalhes.append(nb.observacao)
             texto_detalhes = "   •   ".join(detalhes)
@@ -388,10 +503,7 @@ class AppNobreaks(tk.Tk):
             messagebox.showinfo("Não encontrado", f"Nenhum nobreak com o número de série '{numero_serie}'.")
             return
 
-        self.andares_abertos[nobreak.local.andar] = True
-        self.numero_serie_selecionado = nobreak.numero_serie
-        self._rolar_ate_pendente = nobreak.numero_serie
-        self.atualizar_lista()
+        self._navegar_para(nobreak.numero_serie)
 
     def _rolar_ate_widget(self, numero_serie: str):
         widget = self._widgets_nobreak.get(numero_serie)
@@ -462,6 +574,85 @@ class AppNobreaks(tk.Tk):
         self.destroy()
 
 
+class JanelaPendencias(tk.Toplevel):
+    """
+    Janela que lista as pendências do cadastro (sem número de série / duplicados).
+    Diferente de uma caixa de aviso comum, o texto aqui pode ser selecionado com o
+    mouse e copiado (ex: para colar num Bloco de Notas ou mandar no WhatsApp),
+    e tem rolagem, então nunca corta a lista com "...e mais X".
+    """
+
+    def __init__(self, app: "AppNobreaks", texto_completo: str):
+        super().__init__(app)
+        self.title("Pendências no cadastro")
+        self.geometry("560x440")
+        self.configure(bg=COR_FUNDO_CARTAO)
+        self.transient(app)
+
+        tk.Label(
+            self,
+            text="⚠️  Pendências encontradas no cadastro",
+            font=("Segoe UI", 12, "bold"),
+            bg=COR_FUNDO_CARTAO,
+            fg=COR_TEXTO,
+            anchor="w",
+            padx=16,
+            pady=12,
+        ).pack(fill="x")
+
+        area_texto = tk.Frame(self, bg=COR_FUNDO_CARTAO, padx=16)
+        area_texto.pack(fill="both", expand=True)
+
+        barra_rolagem = ttk.Scrollbar(area_texto, orient="vertical")
+        self.caixa_texto = tk.Text(
+            area_texto,
+            wrap="word",
+            font=FONTE_PADRAO,
+            yscrollcommand=barra_rolagem.set,
+            relief="solid",
+            borderwidth=1,
+            padx=10,
+            pady=10,
+        )
+        barra_rolagem.config(command=self.caixa_texto.yview)
+        barra_rolagem.pack(side="right", fill="y")
+        self.caixa_texto.pack(side="left", fill="both", expand=True, pady=(0, 10))
+
+        self.caixa_texto.insert("1.0", texto_completo)
+        # Deixa o texto selecionável/copiável, mas impede que a pessoa edite o conteúdo.
+        self.caixa_texto.bind("<Key>", self._bloquear_digitacao)
+        self.caixa_texto.bind("<Control-a>", self._selecionar_tudo)
+        self.caixa_texto.focus_set()
+
+        rodape = tk.Frame(self, bg=COR_FUNDO_CARTAO, padx=16, pady=12)
+        rodape.pack(fill="x")
+
+        ttk.Button(
+            rodape, text="Copiar tudo", style="Secundario.TButton",
+            command=lambda: self._copiar_tudo(texto_completo),
+        ).pack(side="left")
+        ttk.Button(rodape, text="Fechar", style="Primario.TButton", command=self.destroy).pack(side="right")
+
+    def _bloquear_digitacao(self, evento):
+        """Permite copiar (Ctrl+C), selecionar tudo (Ctrl+A) e navegar com as setas,
+        mas bloqueia qualquer tecla que tentaria alterar o texto."""
+        eh_atalho_permitido = (evento.state & 0x4) and evento.keysym.lower() in ("c", "a")
+        eh_tecla_navegacao = evento.keysym in (
+            "Up", "Down", "Left", "Right", "Prior", "Next", "Home", "End"
+        )
+        if eh_atalho_permitido or eh_tecla_navegacao:
+            return None
+        return "break"
+
+    def _selecionar_tudo(self, evento):
+        self.caixa_texto.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _copiar_tudo(self, texto: str):
+        self.clipboard_clear()
+        self.clipboard_append(texto)
+
+
 class _FormBase(tk.Toplevel):
     """Janela auxiliar simples, centralizada sobre a janela principal."""
 
@@ -516,26 +707,32 @@ class FormAdicionar(_FormBase):
         self.combo_status.current(0)
         self.combo_status.grid(row=3, column=1, pady=5)
 
-        tk.Label(campos, text="Potência em VA (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
+        tk.Label(campos, text="Marca (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
             row=4, column=0, sticky="w", pady=5
         )
-        self.entrada_va = ttk.Entry(campos, width=30, font=FONTE_PADRAO)
-        self.entrada_va.grid(row=4, column=1, pady=5)
+        self.entrada_marca = criar_campo_maiusculas(campos, width=30)
+        self.entrada_marca.grid(row=4, column=1, pady=5)
 
-        tk.Label(campos, text="Modelo (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
+        tk.Label(campos, text="Potência em VA (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
             row=5, column=0, sticky="w", pady=5
         )
-        self.entrada_modelo = criar_campo_maiusculas(campos, width=30)
-        self.entrada_modelo.grid(row=5, column=1, pady=5)
+        self.entrada_va = ttk.Entry(campos, width=30, font=FONTE_PADRAO)
+        self.entrada_va.grid(row=5, column=1, pady=5)
 
-        tk.Label(campos, text="Observação (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
+        tk.Label(campos, text="Modelo (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
             row=6, column=0, sticky="w", pady=5
         )
+        self.entrada_modelo = criar_campo_maiusculas(campos, width=30)
+        self.entrada_modelo.grid(row=6, column=1, pady=5)
+
+        tk.Label(campos, text="Observação (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
+            row=7, column=0, sticky="w", pady=5
+        )
         self.entrada_observacao = criar_campo_maiusculas(campos, width=30)
-        self.entrada_observacao.grid(row=6, column=1, pady=5)
+        self.entrada_observacao.grid(row=7, column=1, pady=5)
 
         ttk.Button(campos, text="Salvar", style="Primario.TButton", command=self._salvar).grid(
-            row=7, column=0, columnspan=2, pady=(14, 0), sticky="ew"
+            row=8, column=0, columnspan=2, pady=(14, 0), sticky="ew"
         )
 
     def _salvar(self):
@@ -546,13 +743,26 @@ class FormAdicionar(_FormBase):
             messagebox.showerror("Campos obrigatórios", "Preencha o número de série e o setor.")
             return
 
+        ja_existente = self.app.gerenciador.buscar_ignorando_caixa(numero_serie)
+        if ja_existente:
+            messagebox.showerror(
+                "Número de série já existe",
+                f"Já existe um nobreak cadastrado com o número de série '{numero_serie}':\n\n"
+                f"Localização atual: {nome_andar(ja_existente.local.andar)} / {ja_existente.local.setor}\n\n"
+                "Se quiser corrigir os dados dele, use a opção 'Editar' em vez de 'Adicionar'.",
+            )
+            return
+
         andar = ANDARES_VALIDOS[self.combo_andar.current()]
         status = list(StatusNobreak)[self.combo_status.current()]
+        marca = self.entrada_marca.get().strip()
         va = self.entrada_va.get().strip()
         modelo = self.entrada_modelo.get().strip()
         observacao = self.entrada_observacao.get().strip()
 
-        self.app.gerenciador.adicionar(Nobreak(numero_serie, Local(andar, setor), status, modelo, observacao, va))
+        self.app.gerenciador.adicionar(
+            Nobreak(numero_serie, Local(andar, setor), status, modelo, observacao, va, marca)
+        )
         self.app.atualizar_lista()
         self.destroy()
 
@@ -637,29 +847,36 @@ class FormEditar(_FormBase):
         self.combo_status.current(list(StatusNobreak).index(nobreak.status))
         self.combo_status.grid(row=3, column=1, pady=5)
 
-        tk.Label(campos, text="Potência em VA (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
+        tk.Label(campos, text="Marca (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
             row=4, column=0, sticky="w", pady=5
+        )
+        self.entrada_marca = criar_campo_maiusculas(campos, width=30)
+        self.entrada_marca.insert(0, nobreak.marca)
+        self.entrada_marca.grid(row=4, column=1, pady=5)
+
+        tk.Label(campos, text="Potência em VA (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
+            row=5, column=0, sticky="w", pady=5
         )
         self.entrada_va = ttk.Entry(campos, width=30, font=FONTE_PADRAO)
         self.entrada_va.insert(0, nobreak.va)
-        self.entrada_va.grid(row=4, column=1, pady=5)
+        self.entrada_va.grid(row=5, column=1, pady=5)
 
         tk.Label(campos, text="Modelo (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
-            row=5, column=0, sticky="w", pady=5
+            row=6, column=0, sticky="w", pady=5
         )
         self.entrada_modelo = criar_campo_maiusculas(campos, width=30)
         self.entrada_modelo.insert(0, nobreak.modelo)
-        self.entrada_modelo.grid(row=5, column=1, pady=5)
+        self.entrada_modelo.grid(row=6, column=1, pady=5)
 
         tk.Label(campos, text="Observação (opcional):", bg=COR_FUNDO_CARTAO, font=FONTE_PADRAO).grid(
-            row=6, column=0, sticky="w", pady=5
+            row=7, column=0, sticky="w", pady=5
         )
         self.entrada_observacao = criar_campo_maiusculas(campos, width=30)
         self.entrada_observacao.insert(0, nobreak.observacao)
-        self.entrada_observacao.grid(row=6, column=1, pady=5)
+        self.entrada_observacao.grid(row=7, column=1, pady=5)
 
         ttk.Button(campos, text="Salvar correção", style="Primario.TButton", command=self._salvar).grid(
-            row=7, column=0, columnspan=2, pady=(14, 0), sticky="ew"
+            row=8, column=0, columnspan=2, pady=(14, 0), sticky="ew"
         )
 
     def _salvar(self):
@@ -672,11 +889,12 @@ class FormEditar(_FormBase):
 
         andar = ANDARES_VALIDOS[self.combo_andar.current()]
         status = list(StatusNobreak)[self.combo_status.current()]
+        marca = self.entrada_marca.get().strip()
         va = self.entrada_va.get().strip()
         modelo = self.entrada_modelo.get().strip()
         observacao = self.entrada_observacao.get().strip()
 
-        nobreak_atualizado = Nobreak(novo_numero_serie, Local(andar, setor), status, modelo, observacao, va)
+        nobreak_atualizado = Nobreak(novo_numero_serie, Local(andar, setor), status, modelo, observacao, va, marca)
 
         try:
             self.app.gerenciador.editar(self.numero_serie_original, nobreak_atualizado)

@@ -33,13 +33,24 @@ def _ler_status() -> StatusNobreak:
 def menu_adicionar(gerenciador: GerenciadorNobreaks) -> None:
     print("\n-- Adicionar / atualizar nobreak --")
     numero_serie = input("Número de série: ").strip()
+
+    ja_existente = gerenciador.buscar_ignorando_caixa(numero_serie)
+    if ja_existente:
+        print(
+            f"Erro: já existe um nobreak cadastrado com o número de série '{numero_serie}'.\n"
+            f"Localização atual: {nome_andar(ja_existente.local.andar)} / {ja_existente.local.setor}\n"
+            "Se quiser corrigir os dados dele, use a opção 'Editar nobreak'.\n"
+        )
+        return
+
     andar = _ler_andar()
     setor = input("Setor (ex: UTI, Recepção): ").strip()
     status = _ler_status()
+    marca = input("Marca (opcional, ex: APC, SMS): ").strip()
     va = input("Potência em VA (opcional, ex: 1500): ").strip()
     modelo = input("Modelo (opcional): ").strip()
     observacao = input("Observação (opcional): ").strip()
-    gerenciador.adicionar(Nobreak(numero_serie, Local(andar, setor), status, modelo, observacao, va))
+    gerenciador.adicionar(Nobreak(numero_serie, Local(andar, setor), status, modelo, observacao, va, marca))
     print(f"Nobreak {numero_serie} salvo.\n")
 
 
@@ -76,11 +87,12 @@ def menu_editar(gerenciador: GerenciadorNobreaks) -> None:
     novo_status = _ler_status() if resposta_status == "s" else nobreak.status
 
     novo_va = input(f"Potência em VA [{nobreak.va or '(vazio)'}]: ").strip() or nobreak.va
+    nova_marca = input(f"Marca [{nobreak.marca or '(vazio)'}]: ").strip() or nobreak.marca
     novo_modelo = input(f"Modelo [{nobreak.modelo or '(vazio)'}]: ").strip() or nobreak.modelo
     nova_observacao = input(f"Observação [{nobreak.observacao or '(vazio)'}]: ").strip() or nobreak.observacao
 
     nobreak_atualizado = Nobreak(
-        novo_numero_serie, Local(novo_andar, novo_setor), novo_status, novo_modelo, nova_observacao, novo_va
+        novo_numero_serie, Local(novo_andar, novo_setor), novo_status, novo_modelo, nova_observacao, novo_va, nova_marca
     )
 
     try:

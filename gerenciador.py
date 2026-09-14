@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 
 from models import Local, Nobreak, StatusNobreak, chave_ordenacao_andar, nome_andar
 
-COLUNAS_NOBREAK = "numero_serie, andar, setor, status, modelo, observacao, va"
+COLUNAS_NOBREAK = "numero_serie, andar, setor, status, modelo, observacao, va, marca"
 
 
 class NumeroSerieJaExisteError(Exception):
@@ -33,36 +33,41 @@ class GerenciadorNobreaks:
                 status TEXT NOT NULL,
                 modelo TEXT DEFAULT '',
                 observacao TEXT DEFAULT '',
-                va TEXT DEFAULT ''
+                va TEXT DEFAULT '',
+                marca TEXT DEFAULT ''
             )
         """)
         self._conexao.commit()
-        self._adicionar_coluna_va_se_necessario()
+        self._adicionar_coluna_se_necessario("va")
+        self._adicionar_coluna_se_necessario("marca")
         # Migração: bancos antigos usavam "ruim" como status; agora chamamos de "defeito".
         self._conexao.execute("UPDATE nobreaks SET status = 'defeito' WHERE status = 'ruim'")
         self._conexao.commit()
         self._migrar_para_maiusculas()
 
-    def _adicionar_coluna_va_se_necessario(self) -> None:
-        """Bancos criados antes da opção de VA não têm essa coluna; adiciona se faltar."""
+    def _adicionar_coluna_se_necessario(self, nome_coluna: str) -> None:
+        """Bancos criados antes de uma coluna nova não a têm; adiciona se faltar."""
         colunas = [linha[1] for linha in self._conexao.execute("PRAGMA table_info(nobreaks)").fetchall()]
-        if "va" not in colunas:
-            self._conexao.execute("ALTER TABLE nobreaks ADD COLUMN va TEXT DEFAULT ''")
+        if nome_coluna not in colunas:
+            self._conexao.execute(f"ALTER TABLE nobreaks ADD COLUMN {nome_coluna} TEXT DEFAULT ''")
             self._conexao.commit()
 
     def _migrar_para_maiusculas(self) -> None:
-        """Converte setor/modelo/observação já salvos para maiúsculas (uma vez só, se precisar)."""
+        """Converte setor/modelo/observação/marca já salvos para maiúsculas (uma vez só, se precisar)."""
         linhas = self._conexao.execute(
-            "SELECT numero_serie, setor, modelo, observacao FROM nobreaks"
+            "SELECT numero_serie, setor, modelo, observacao, marca FROM nobreaks"
         ).fetchall()
-        for numero_serie, setor, modelo, observacao in linhas:
+        for numero_serie, setor, modelo, observacao, marca in linhas:
             setor_maiusculo = (setor or "").upper()
             modelo_maiusculo = (modelo or "").upper()
             observacao_maiuscula = (observacao or "").upper()
-            if (setor, modelo, observacao) != (setor_maiusculo, modelo_maiusculo, observacao_maiuscula):
+            marca_maiuscula = (marca or "").upper()
+            valores_atuais = (setor, modelo, observacao, marca)
+            valores_novos = (setor_maiusculo, modelo_maiusculo, observacao_maiuscula, marca_maiuscula)
+            if valores_atuais != valores_novos:
                 self._conexao.execute(
-                    "UPDATE nobreaks SET setor = ?, modelo = ?, observacao = ? WHERE numero_serie = ?",
-                    (setor_maiusculo, modelo_maiusculo, observacao_maiuscula, numero_serie),
+                    "UPDATE nobreaks SET setor = ?, modelo = ?, observacao = ?, marca = ? WHERE numero_serie = ?",
+                    (*valores_novos, numero_serie),
                 )
         self._conexao.commit()
 
@@ -73,18 +78,19 @@ class GerenciadorNobreaks:
 
     def adicionar(self, nobreak: Nobreak) -> None:
         """Insere um nobreak novo, ou atualiza se o número de série já existir.
-        Setor, modelo e observação são sempre guardados em maiúsculas."""
+        Setor, modelo, observação e marca são sempre guardados em maiúsculas."""
         self._conexao.execute(
             """
-            INSERT INTO nobreaks (numero_serie, andar, setor, status, modelo, observacao, va)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO nobreaks (numero_serie, andar, setor, status, modelo, observacao, va, marca)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(numero_serie) DO UPDATE SET
                 andar=excluded.andar,
                 setor=excluded.setor,
                 status=excluded.status,
                 modelo=excluded.modelo,
                 observacao=excluded.observacao,
-                va=excluded.va
+                va=excluded.va,
+                marca=excluded.marca
             """,
             (
                 nobreak.numero_serie,
@@ -94,6 +100,7 @@ class GerenciadorNobreaks:
                 nobreak.modelo.upper(),
                 nobreak.observacao.upper(),
                 nobreak.va,
+                nobreak.marca.upper(),
             ),
         )
         self._conexao.commit()
@@ -114,7 +121,7 @@ class GerenciadorNobreaks:
         cursor = self._conexao.execute(
             """
             UPDATE nobreaks
-            SET numero_serie = ?, andar = ?, setor = ?, status = ?, modelo = ?, observacao = ?, va = ?
+            SET numero_serie = ?, andar = ?, setor = ?, status = ?, modelo = ?, observacao = ?, va = ?, marca = ?
             WHERE numero_serie = ?
             """,
             (
@@ -125,6 +132,7 @@ class GerenciadorNobreaks:
                 nobreak_atualizado.modelo.upper(),
                 nobreak_atualizado.observacao.upper(),
                 nobreak_atualizado.va,
+                nobreak_atualizado.marca.upper(),
                 numero_serie_atual,
             ),
         )
@@ -176,6 +184,19 @@ class GerenciadorNobreaks:
         ).fetchone()
         return self._linha_para_nobreak(linha) if linha else None
 
+    def buscar_ignorando_caixa(self, numero_serie: str) -> Optional[Nobreak]:
+        """
+        Como buscar(), mas ignora maiúsculas/minúsculas e espaços - usado para
+        avisar sobre duplicidade mesmo quando a diferença é só na digitação
+        (ex: 'abc123' encontra 'ABC123').
+        """
+        alvo = numero_serie.strip().upper()
+        linha = self._conexao.execute(
+            f"SELECT {COLUNAS_NOBREAK} FROM nobreaks WHERE UPPER(TRIM(numero_serie)) = ?",
+            (alvo,),
+        ).fetchone()
+        return self._linha_para_nobreak(linha) if linha else None
+
     def todos(self) -> List[Nobreak]:
         linhas = self._conexao.execute(
             f"SELECT {COLUNAS_NOBREAK} FROM nobreaks ORDER BY setor, numero_serie"
@@ -220,6 +241,23 @@ class GerenciadorNobreaks:
             agrupado[nb.local].append(nb)
         return dict(agrupado)
 
+    def buscar_sem_numero_serie_real(self) -> List[Nobreak]:
+        """Nobreaks importados sem número de série (receberam um temporário 'SEM-SERIE-XX')."""
+        return [nb for nb in self.todos() if nb.numero_serie.upper().startswith("SEM-SERIE")]
+
+    def buscar_possiveis_duplicados(self) -> List[List[Nobreak]]:
+        """
+        Agrupa nobreaks cujo número de série é igual, ignorando maiúsculas/minúsculas
+        e espaços (ex: 'onz0010893784' e 'ONZ0010893784' seriam considerados o mesmo).
+        Como o número de série é único no banco, duplicidade EXATA nunca acontece -
+        isso pega duplicidade "disfarçada" por diferença de digitação.
+        """
+        grupos = defaultdict(list)
+        for nb in self.todos():
+            chave = nb.numero_serie.strip().upper()
+            grupos[chave].append(nb)
+        return [grupo for grupo in grupos.values() if len(grupo) > 1]
+
     def imprimir_relatorio(self) -> None:
         total = self.contar_por_status()
         print("=== RESUMO GERAL ===")
@@ -236,7 +274,7 @@ class GerenciadorNobreaks:
 
     @staticmethod
     def _linha_para_nobreak(linha) -> Nobreak:
-        numero_serie, andar, setor, status, modelo, observacao, va = linha
+        numero_serie, andar, setor, status, modelo, observacao, va, marca = linha
         return Nobreak(
             numero_serie=numero_serie,
             local=Local(andar=andar, setor=setor),
@@ -244,4 +282,5 @@ class GerenciadorNobreaks:
             modelo=modelo,
             observacao=observacao,
             va=va or "",
+            marca=marca or "",
         )
